@@ -1,0 +1,101 @@
+name: Release
+
+# A `v*` tag builds the three executables, tests each one with the model on
+# its own platform, then publishes a release with them, SHA256SUMS, LICENSE
+# and THIRD-PARTY-NOTICES. The model itself stays in the permanent
+# `model-maia3-5m` release (README, "Model file").
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  MAIA3_REQUIRE_MODEL: "1"
+  MODEL_RELEASE: model-maia3-5m
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset: notichess-maia3-macos-aarch64
+            macos_min: "11.0"
+          # macos-13 runners are retired; macos-15-intel is the x86_64 image.
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: notichess-maia3-macos-x86_64
+            macos_min: "10.13"
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: notichess-maia3-windows-x86_64.exe
+    runs-on: ${{ matrix.runner }}
+    env:
+      # Same minimum for the C/assembly kernels of tract as for the Rust code.
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Tag matches the crate version
+        shell: bash
+        run: test "$GITHUB_REF_NAME" = "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+      - name: Model
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$MODEL_RELEASE" --repo "$GITHUB_REPOSITORY" --pattern maia3-5m.onnx
+          if command -v shasum >/dev/null; then
+            shasum -a 256 -c maia3-5m.onnx.sha256
+          else
+            sha256sum -c maia3-5m.onnx.sha256
+          fi
+          model="$PWD/maia3-5m.onnx"
+          if [ "$RUNNER_OS" = Windows ]; then model=$(cygpath -w "$model"); fi
+          echo "MAIA3_ONNX=$model" >> "$GITHUB_ENV"
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - run: cargo test --locked --release --target ${{ matrix.target }}
+      - name: Name the executable
+        shell: bash
+        run: |
+          mkdir dist
+          bin=target/${{ matrix.target }}/release/notichess-maia3
+          if [ "$RUNNER_OS" = Windows ]; then bin="$bin.exe"; fi
+          cp "$bin" "dist/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: |
+          cp LICENSE THIRD-PARTY-NOTICES dist/
+          cd dist
+          sha256sum notichess-maia3-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "notichess-maia3 $GITHUB_REF_NAME" \
+            --notes "Executables of notichess-maia3 $GITHUB_REF_NAME, built and tested from this tag (AGPL-3.0; source: this repository at the tag; third-party licenses: THIRD-PARTY-NOTICES).
+
+          The model they run, maia3-5m.onnx (Maia3-5M by the CSSLab, University of Toronto, AGPL-3.0), is in the release $MODEL_RELEASE, with its SHA-256." \
+            dist/*

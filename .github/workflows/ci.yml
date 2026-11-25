@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The model tests fail instead of being skipped when the model is missing.
+  MAIA3_REQUIRE_MODEL: "1"
+  # Permanent release that holds maia3-5m.onnx (README, "Model file").
+  MODEL_RELEASE: model-maia3-5m
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: THIRD-PARTY-NOTICES is up to date
+        run: |
+          python3 scripts/third_party_notices.py > THIRD-PARTY-NOTICES
+          git diff --exit-code THIRD-PARTY-NOTICES
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Model
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$MODEL_RELEASE" --repo "$GITHUB_REPOSITORY" --pattern maia3-5m.onnx
+          if command -v shasum >/dev/null; then
+            shasum -a 256 -c maia3-5m.onnx.sha256
+          else
+            sha256sum -c maia3-5m.onnx.sha256
+          fi
+          model="$PWD/maia3-5m.onnx"
+          if [ "$RUNNER_OS" = Windows ]; then model=$(cygpath -w "$model"); fi
+          echo "MAIA3_ONNX=$model" >> "$GITHUB_ENV"
+      - run: cargo test --locked
