@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-15-intel, windows-latest]
+        runner: [macos-15, macos-15-intel, windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,3 +50,50 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then model=$(cygpath -w "$model"); fi
           echo "MAIA3_ONNX=$model" >> "$GITHUB_ENV"
       - run: cargo test --locked
+
+  # The musl executable that release.yml publishes, on old and varied
+  # distributions and on a CPU without AVX (README, "Linux").
+  linux-compat:
+    runs-on: ubuntu-22.04
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$MODEL_RELEASE" --repo "$GITHUB_REPOSITORY" --pattern maia3-5m.onnx
+          sha256sum -c maia3-5m.onnx.sha256
+          echo "MAIA3_ONNX=$PWD/maia3-5m.onnx" >> "$GITHUB_ENV"
+      # musl-gcc assembles the x86_64 kernels of tract-linalg (cc crate);
+      # qemu-user runs the last step.
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools qemu-user
+      - run: rustup target add "$TARGET"
+      - run: cargo test --locked --release --target "$TARGET"
+      - name: Static executable
+        run: |
+          bin=target/$TARGET/release/notichess-maia3
+          file "$bin"
+          file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          ldd "$bin" 2>&1 | tee ldd.txt || true
+          grep -Eq 'statically linked|not a dynamic executable' ldd.txt
+      - name: Old and varied distributions
+        run: |
+          fail=0
+          for image in debian:10 ubuntu:18.04 centos:7 rockylinux:8 alpine:3 fedora:latest opensuse/leap:15; do
+            printf 'uci\nsetoption name WeightsFile value /maia/maia3-5m.onnx\nisready\nposition startpos moves e2e4 e7e5\ngo nodes 1\nquit\n' \
+              | docker run --rm -i --network none -v "$PWD:/maia:ro" "$image" "/maia/target/$TARGET/release/notichess-maia3" > out.txt || true
+            if grep -qx uciok out.txt && grep -qx readyok out.txt \
+              && grep -Eqx 'bestmove [a-h][1-8][a-h][1-8]' out.txt && ! grep -q '^error' out.txt; then
+              echo "$image: $(grep -x 'info string node ([0-9]*)' out.txt), $(tail -1 out.txt)"
+            else
+              echo "::error::$image"; cat out.txt; fail=1
+            fi
+          done
+          exit $fail
+      # qemu64: SSE3, no AVX, so tract falls back to its generic kernels.
+      - name: x86_64 without AVX
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUNNER: qemu-x86_64 -cpu qemu64
+        run: cargo test --locked --release --target "$TARGET" golden -- --nocapture
