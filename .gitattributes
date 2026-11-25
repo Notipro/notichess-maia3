@@ -1,0 +1,4 @@
+# LF everywhere: the Windows runner would otherwise check out maia3-5m.onnx.sha256
+# with CRLF and `sha256sum -c` would look for "maia3-5m.onnx\r".
+* text=auto eol=lf
+*.onnx binary
