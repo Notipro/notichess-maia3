@@ -1,6 +1,6 @@
 name: Release
 
-# A `v*` tag builds the three executables, tests each one with the model on
+# A `v*` tag builds the four executables, tests each one with the model on
 # its own platform, then publishes a release with them, SHA256SUMS, LICENSE
 # and THIRD-PARTY-NOTICES. The model itself stays in the permanent
 # `model-maia3-5m` release (README, "Model file").
@@ -33,6 +33,11 @@ jobs:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             asset: notichess-maia3-windows-x86_64.exe
+          # musl: one fully static executable for every distribution, without
+          # glibc (README, "Linux").
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            asset: notichess-maia3-linux-x86_64
     runs-on: ${{ matrix.runner }}
     env:
       # Same minimum for the C/assembly kernels of tract as for the Rust code.
@@ -56,6 +61,9 @@ jobs:
           model="$PWD/maia3-5m.onnx"
           if [ "$RUNNER_OS" = Windows ]; then model=$(cygpath -w "$model"); fi
           echo "MAIA3_ONNX=$model" >> "$GITHUB_ENV"
+      # musl-gcc assembles the x86_64 kernels of tract-linalg (cc crate).
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: rustup target add ${{ matrix.target }}
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - run: cargo test --locked --release --target ${{ matrix.target }}
@@ -66,6 +74,11 @@ jobs:
           bin=target/${{ matrix.target }}/release/notichess-maia3
           if [ "$RUNNER_OS" = Windows ]; then bin="$bin.exe"; fi
           cp "$bin" "dist/${{ matrix.asset }}"
+      - name: The Linux executable is static
+        if: runner.os == 'Linux'
+        run: |
+          file dist/${{ matrix.asset }}
+          file dist/${{ matrix.asset }} | grep -Eq 'statically linked|static-pie linked'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
