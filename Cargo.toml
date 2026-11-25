@@ -1,0 +1,21 @@
+[package]
+name = "notichess-maia3"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "AGPL-3.0-only"
+description = "UCI-style engine that plays the Maia-3 5M human move prediction model (CSSLab) with tract"
+publish = false
+
+[dependencies]
+cozy-chess = "=0.3.4"
+tract-onnx = "=0.23.10"
+
+[dev-dependencies]
+serde_json = "=1.0.149"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
