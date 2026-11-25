@@ -21,7 +21,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
             asset: notichess-maia3-macos-aarch64
             macos_min: "11.0"
