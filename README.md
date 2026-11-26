@@ -8,9 +8,9 @@ search.
 
 It is used by [NotiChess](https://notichess.com) as an external engine, in a
 separate process, for its games against Maia. It runs on macOS (Apple silicon
-and Intel) and Windows without Python, PyTorch or any native library: the
-network runs on [tract](https://github.com/sonos/tract), a pure Rust inference
-engine.
+and Intel), Windows and Linux (x86_64) without Python, PyTorch or any native
+library: the network runs on [tract](https://github.com/sonos/tract), a pure
+Rust inference engine.
 
 This project is not affiliated with or endorsed by the CSSLab.
 
@@ -197,6 +197,62 @@ it is MIT licensed.
 On Windows the C runtime is linked statically (`.cargo/config.toml`), so the
 executable runs without the Visual C++ redistributable.
 
+On Linux the published executable is built for musl, statically (see
+[Linux](#linux)):
+
+```bash
+sudo apt-get install musl-tools   # musl-gcc, for the assembly kernels of tract
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+From macOS, [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
+builds the same target: `cargo zigbuild --release --target x86_64-unknown-linux-musl`.
+
+## Linux
+
+One executable, `notichess-maia3-linux-x86_64`, for every x86_64
+distribution:
+
+- **Static.** Built for `x86_64-unknown-linux-musl`: the musl C library
+  (1.2.5, the one Rust 1.95 ships for this target) is linked in, with no
+  dynamic loader and no glibc. `file` says `statically linked` (or
+  `static-pie linked`) and `ldd` says `not a dynamic executable` (or
+  `statically linked`); the CI checks both.
+- **Kernel.** Linux 3.2 or later, the minimum of every Rust Linux target
+  ("`*-linux-musl*` targets are only affected by the kernel requirements, not
+  the glibc requirements",
+  [Rust blog, 2022-08-01](https://blog.rust-lang.org/2022/08/01/Increasing-glibc-kernel-requirements/)).
+  The containers of the CI share the runner's kernel, so old kernels are not
+  tested.
+- **No system dependency.** The only native code is the x86_64 assembly of
+  tract-linalg, assembled by its build script (`cc` crate, `musl-gcc`) and
+  calling no library. No `*-sys` crate, no `dlopen`, no network. Besides
+  the weights, tract reads `/sys/devices/system/cpu` for the cache sizes,
+  and does without it.
+- **Processor.** The Rust code targets baseline x86-64 (SSE2). tract-linalg
+  builds its AVX, FMA and AVX2, AVX-512 (and VNNI, AMX) kernels into the
+  executable and chooses at run time from CPUID (`is_x86_feature_detected!`,
+  `tract_linalg::x86_64::isa_set`): AVX-512F, else FMA with AVX2, else AVX,
+  else its generic Rust kernels. A processor without AVX2, or without AVX,
+  runs the generic kernels, slower, with the same policy within rounding.
+  The CI runs the golden test under QEMU with the `qemu64` processor (SSE3, no
+  AVX). The same holds for the Windows and macOS x86_64 executables.
+- **Execute bit.** A download keeps no file mode, so the release asset is
+  not executable as downloaded: whoever extracts it sets the bit
+  (`chmod 755`) before running it.
+- **Tested.** The `linux-compat` job of the CI builds the musl executable,
+  runs every test with the model, checks `file` and `ldd`, then runs a UCI
+  dialogue up to `bestmove`, with the model mounted read-only and no network,
+  in `debian:10`, `ubuntu:18.04`, `centos:7`, `rockylinux:8`, `alpine:3`,
+  `fedora:latest` and `opensuse/leap:15`.
+- **No linux-aarch64 yet**, since NotiChess does not ship Linux on ARM. To
+  add it: an `ubuntu-22.04-arm` runner, target `aarch64-unknown-linux-musl`
+  and asset `notichess-maia3-linux-aarch64` in the matrix of `release.yml`,
+  the same runner in the test matrix and a second `linux-compat` run in
+  `ci.yml`; tract then builds its NEON kernels, plus the SVE, SME and dotprod
+  ones its build script can assemble, also chosen at run time.
+
 ## Tests
 
 ```bash
@@ -205,7 +261,9 @@ MAIA3_ONNX=/path/to/maia3-5m.onnx cargo test --release   # plus the model tests
 ```
 
 Without `MAIA3_ONNX` the model tests are skipped, unless
-`MAIA3_REQUIRE_MODEL=1` (set by both workflows), which makes them fail.
+`MAIA3_REQUIRE_MODEL=1` (set by both workflows), which makes them fail. The
+CI runs them on macOS (arm64 and x86_64), Windows and Ubuntu 22.04, and on the
+musl build in its `linux-compat` job ([Linux](#linux)).
 
 - Unit tests (`src/encoding.rs`, `src/lib.rs`): board planes, mirroring when
   Black is to move, history padding and truncation, policy indices of
@@ -244,10 +302,14 @@ release with
 - `notichess-maia3-macos-aarch64`
 - `notichess-maia3-macos-x86_64`
 - `notichess-maia3-windows-x86_64.exe`
-- `SHA256SUMS` of the three executables
+- `notichess-maia3-linux-x86_64`
+- `SHA256SUMS` of the four executables
 - `LICENSE` and `THIRD-PARTY-NOTICES`.
 
 The model stays in `model-maia3-5m`, which must exist before the first tag.
+
+v0.1.1 adds the Linux executable. The protocol, the options and the policy
+are those of v0.1.0.
 
 ## Third-party notices
 
@@ -256,7 +318,8 @@ executables with its license and license texts. It is generated by
 [`scripts/third_party_notices.py`](scripts/third_party_notices.py) from
 `Cargo.lock`, and the CI checks it is up to date. `licenses/` holds the
 license texts that a crate package does not ship (cozy-chess, copied from its
-repository at the released commit).
+repository at the released commit), and the `COPYRIGHT` file of musl 1.2.5,
+the C library linked into the Linux executable.
 
 ## Performance
 
@@ -269,6 +332,21 @@ Apple M4, release build, one thread:
 | `position` + `go`, round trip, 300 calls | median 2.5 to 2.7 ms, 90th percentile 2.8 to 3.3 ms |
 | Peak memory | 66 MB |
 | Executable, stripped (LTO) | 14.6 MB |
+
+Linux, Intel Core i9-10900K (AVX2 and FMA), the musl executable, one thread,
+five runs alternated with a glibc build of the same code:
+
+| | musl (published) | glibc 2.17 |
+|---|---|---|
+| Model load | 190 to 200 ms | 145 to 159 ms |
+| `position` + `go`, round trip, 300 calls | median 14.0 to 14.9 ms, 90th percentile 14.8 to 16.1 ms | median 9.6 to 10.6 ms, 90th percentile 10.4 to 11.6 ms |
+| Minor page faults, 300 calls | 1.2 million | 14 thousand |
+| Peak memory | 49 MB | 60 MB |
+| Executable, stripped (LTO) | 20.3 MB | 21.3 MB |
+
+The gap is the allocator: musl gives the buffers of each `go` back to the
+system and faults them in again at the next one. It costs about 4 ms a move,
+for an executable that runs on every distribution.
 
 ## License
 
